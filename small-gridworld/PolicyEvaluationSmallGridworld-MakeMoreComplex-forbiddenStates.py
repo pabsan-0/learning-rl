@@ -9,6 +9,8 @@ as defined in David Silver lectures on RL, Lecture 3 slide 10
 - Policy is uniform distribution
 - Reward is -1 on every movement except after arriving to goals
 - Goals are top left and bottom right corner
+
+This version includes some additional stuff such as forbidden states (walls)
 '''
 
 def remap(state: int, w: int, h: int) -> list:
