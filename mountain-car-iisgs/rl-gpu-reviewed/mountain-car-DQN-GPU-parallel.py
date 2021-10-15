@@ -83,14 +83,16 @@ class DQN:
         self.network = _network(*args, **kwargs).to(device)
         self.network_tminus1 = _network(*args, **kwargs).to(device)
 
+        self.optimizer = optim.Adam(self.network.parameters(), lr=0.01)
 
     # @lp_print_every_iter
     # @lp
     def stepSGD(self, data):
 
-        showState_inline(data[0].St, str='1')
-        showState_inline(data[1].St, str='2')
-        showState_inline(data[2].St, str='3')
+
+        # showState_inline(data[0].St, str='1')
+        # showState_inline(data[1].St, str='2')
+        # showState_inline(data[2].St, str='3')
 
         St_batch = torch.cat([i.St for i in data], dim=0).to(device)
         At_batch = [i.At for i in data]
@@ -99,25 +101,26 @@ class DQN:
         nonterminal_state_batch = torch.Tensor([not i.done for i in data])
 
         with torch.no_grad():
-            target = self.gamma + torch.max(self.network_tminus1(Stplus1_batch)) * nonterminal_state_batch + Rtplus1_batch
+            targets = self.gamma * torch.max(self.network_tminus1(Stplus1_batch)) * nonterminal_state_batch + Rtplus1_batch
 
         # Forward pass. Prediction should be Q(st,at) so we pick 'at' here
-        prediction = self.network(St_batch)[:,At]
+        prediction = self.network(St_batch)
 
-        print(prediction)
-
-        self.loss = F.mse_loss(prediction, target)
+        #ADHOC
+        At_batch = [torch.tensor([[i]], device=device, dtype=torch.long) for i in At_batch]
+        At_batch = torch.cat(At_batch)
+        self.loss = F.mse_loss(prediction.gather(1, At_batch), targets)
 
         # Store params of time t to t-1 network before doing param upgrade
         with torch.no_grad():
             self.network_tminus1.load_state_dict(self.network.state_dict())
 
         # Compute the gradients, then compute & update the weights
+        self.optimizer.zero_grad()
         self.loss.backward()
-        optimizer = optim.Adam(self.network.parameters(), lr=0.01)
-        optimizer.step()
+        self.optimizer.step()
 
-        ## And this finishes one step of training
+        globals().update(locals())
 
         return None
 
@@ -135,10 +138,10 @@ class _network(nn.Module):
         super().__init__()
 
         # These are instanced here because they are objects that contain weights
-        self.conv1 = nn.Conv2d(in_channels=n_frames, out_channels=16, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
+        self.conv1 = nn.Conv2d(in_channels=n_frames, out_channels=2, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(in_channels=2, out_channels=4, kernel_size=4, stride=2)
 
-        self.fc1 = nn.Linear(in_features=2592, out_features=256)
+        self.fc1 = nn.Linear(in_features=324, out_features=256)
         self.out = nn.Linear(in_features=256, out_features=n_actions)
 
     def forward(self, t):
@@ -184,10 +187,11 @@ def showState_inline(tensor_img,  gap_length=2, gap_element=1, str='state'):
     cv2.imshow(str, cv2.pyrUp(np.hstack(arrays)))
     cv2.waitKey(0)
 
-def state2tensor(state): ### FIXME!!!!
+def state2tensor(state):
     state = torch.from_numpy(np.stack(state)).permute(0, 3, 1, 2)
     state = transforms.functional.rgb_to_grayscale(state)
-    state = F.interpolate(state, size=[84,84]).float()
+    state = F.interpolate(state, size=[84,84])
+    state = state / 255
     St = state[:-1,:,:,:].permute(1, 0, 2, 3)
     Stplus1 = state[1:,:,:,:].permute(1, 0, 2, 3)
     return St, Stplus1
@@ -207,13 +211,12 @@ def frame_skipping_step(env, At, nframes=1):
 if __name__ == '__main__':
 
     # Init environment and create state placeholder as list of 4 consecutive frames
-    env = gym.make('MountainCar-v0')
+    env = gym.make('CartPole-v0')
     env.reset()
-
 
     # Init memory and Q network
     device = torch.device(1 if torch.cuda.is_available() else 'cpu')
-    memory = ReplayMemory(max_size=500)
+    memory = ReplayMemory(max_size=100000)
     dqn = DQN(n_frames=4, n_actions=env.action_space.n)
 
     # hyperparams
@@ -258,7 +261,7 @@ if __name__ == '__main__':
                     At = dqn.exploit(St)
 
                 # Execute action in simulator and observe reward and image
-                __, Rtplus1, done, __ = frame_skipping_step(env, At, nframes=6)
+                __, Rtplus1, done, __ = frame_skipping_step(env, At, nframes=3)
                 total_reward += Rtplus1
 
                 # Retrieve the current frame
@@ -267,8 +270,6 @@ if __name__ == '__main__':
 
                 # Convert current St and Stplus1 to tensor and store in memory
                 St, Stplus1 = state2tensor(state_timeline)
-                showState_inline(St, str='st')
-                showState_inline(Stplus1, str='stplus1')
                 transition = Transition(St, At, Rtplus1, Stplus1, done)
                 memory.append(transition)
 
@@ -281,11 +282,14 @@ if __name__ == '__main__':
 
                 St = Stplus1
 
-            # After each episode, record these to tensorboard
-            tb.add_scalar('DQN loss', dqn.loss.item() , episode)
-            tb.add_scalar('Episode reward', total_reward , episode)
-            tb.add_image(f'Layer 1 final kernel all', to_grid(dqn.network.conv1.weight.cpu()), dataformats='HW')
-            tb.add_image(f'Layer 2 final kernel all', to_grid(dqn.network.conv2.weight.cpu()), dataformats='HW')
+            try:
+                # After each episode, record these to tensorboard
+                tb.add_scalar('DQN loss', dqn.loss.item() , episode)
+                tb.add_scalar('Episode reward', total_reward , episode)
+                tb.add_image(f'Layer 1 final kernel all', to_grid(dqn.network.conv1.weight.cpu()), dataformats='HW')
+                tb.add_image(f'Layer 2 final kernel all', to_grid(dqn.network.conv2.weight.cpu()), dataformats='HW')
+            except AttributeError:
+                pass
 
 
     except KeyboardInterrupt:
